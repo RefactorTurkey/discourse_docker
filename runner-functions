@@ -1,0 +1,466 @@
+#!/bin/bash
+
+mkdir -p /var/discourse/shared/redis
+mkdir -p /var/discourse/shared/redis/log/var-log
+
+mkdir -p /var/discourse/shared/data
+mkdir -p /var/discourse/shared/data/log/var-log
+
+mkdir -p /var/discourse/shared/web-only
+mkdir -p /var/discourse/shared/web-only/log/var-log
+
+mkdir -p /var/discourse/shared/standalone
+mkdir -p /var/discourse/shared/standalone/log/var-log
+
+usage () {
+    echo "Usage: launcher COMMAND CONFIG [--skip-prereqs] [--docker-args STRING]"
+    echo "Commands:"
+    echo "    start:      Start/initialize a service"
+    echo "    stop:       Stop a running service"
+    echo "    restart:    Restart a service"
+    echo "    destroy:    Stop and remove a service"
+    echo "    enter:      Open a shell to run commands inside the service"
+    echo "    logs:       View the Docker logs for a service"
+    echo "    bootstrap:  Bootstrap a service for the config based on a template"
+    echo "    rebuild:    Rebuild a service (destroy old, bootstrap, start new)"
+    echo "    cleanup:    Remove all service that have stopped for > 24 hours"
+    echo
+    echo "Options:"
+    echo "    --skip-prereqs             Don't check launcher prerequisites"
+    echo "    --docker-args              Extra arguments to pass when running docker"
+    echo "    --skip-mac-address         Don't assign a mac address"
+    exit 1
+}
+
+host_run() {
+  read -r -d '' env_ruby << 'RUBY'
+  require 'yaml'
+
+  input = STDIN.readlines.join
+  yaml = YAML.load(input)
+
+  if host_run = yaml['host_run']
+    params = yaml['params'] || {}
+    host_run.each do |run|
+      params.each do |k,v|
+        run = run.gsub("$#{k}", v)
+      end
+      STDOUT.write "#{run}--SEP--"
+    end
+  end
+RUBY
+
+  host_run=`cat $config_file | $docker_path run $user_args --rm -i -a stdout -a stdin $image ruby -e "$env_ruby"`
+
+  while [ "$host_run" ] ; do
+    iter=${host_run%%--SEP--*}
+    echo
+    echo "Host run: $iter"
+    $iter || exit 1
+    echo
+    host_run="${host_run#*--SEP--}"
+  done
+}
+
+set_volumes() {
+  volumes=`cat $config_file | $docker_path run $user_args --rm -i -a stdout -a stdin $image ruby -e \
+        "require 'yaml'; puts YAML.load(STDIN.readlines.join)['volumes'].map{|v| '-v ' << v['volume']['host'] << ':' << v['volume']['guest'] << ' '}.join"`
+  echo ${volumes}
+}
+
+volumes() {
+  volumes=`cat $config_file | $docker_path run $user_args --rm -i -a stdout -a stdin $image ruby -e \
+        "require 'yaml'; puts YAML.load(STDIN.readlines.join)['volumes'].map{|v| '--mount type=bind,source=' << v['volume']['host'] << ',target=' << v['volume']['guest'] << ' '}.join"`
+  echo ${volumes}
+}
+
+set_links() {
+    links=`cat $config_file | $docker_path run $user_args --rm -i -a stdout -a stdin $image ruby -e \
+        "require 'yaml'; puts YAML.load(STDIN.readlines.join)['links'].map{|l| '--link ' << l['link']['name'] << ':' << l['link']['alias'] << ' '}.join"`
+    echo ${links}
+}
+
+set_run_image() {
+  run_image=`cat $config_file | $docker_path run $user_args --rm -i -a stdin -a stdout $image ruby -e \
+    "require 'yaml'; puts YAML.load(STDIN.readlines.join)['run_image']"`
+
+  if [ -z "$run_image" ]; then
+    run_image="$local_discourse/$config"
+  fi
+
+  echo ${run_image}
+}
+
+find_templates() {
+    local templates=`cat $1 | $docker_path run $user_args --rm -i -a stdin -a stdout $image ruby -e \
+      "require 'yaml'; puts YAML.load(STDIN.readlines.join)['templates']"`
+
+    local arrTemplates=${templates// / }
+
+    if [ ! -z "$templates" ]; then
+      for template in "${arrTemplates[@]}"
+      do
+        local nested_templates=$(find_templates $template)
+
+        if [ ! -z "$nested_templates" ]; then
+          templates="$templates $nested_templates"
+        fi
+      done
+
+      echo $templates
+    else
+      echo ""
+    fi
+}
+
+set_template_info() {
+    templates=$(find_templates $config_file)
+
+    arrTemplates=(${templates// / })
+    config_data=$(cat $config_file)
+
+    input="hack: true"
+
+    for template in "${arrTemplates[@]}"
+    do
+      [ ! -z $template ] && {
+        input="$input _FILE_SEPERATOR_ $(cat $template)"
+      }
+    done
+
+    # we always want our config file last so it takes priority
+    input="$input _FILE_SEPERATOR_ $config_data"
+
+    read -r -d '' env_ruby << 'RUBY'
+    require 'yaml'
+
+    input=STDIN.readlines.join
+    # default to UTF-8 for the dbs sake
+    env = {'LANG' => 'en_US.UTF-8'}
+    input.split('_FILE_SEPERATOR_').each do |yml|
+       yml.strip!
+       begin
+         env.merge!(YAML.load(yml)['env'] || {})
+       rescue Psych::SyntaxError => e
+        puts e
+        puts "*ERROR."
+       rescue => e
+        puts yml
+        p e
+       end
+    end
+    puts env.map{|k,v| "-e\n#{k}=#{v}" }.join("\n")
+RUBY
+
+    raw=`exec echo "$input" | $docker_path run $user_args --rm -i -a stdin -a stdout $image ruby -e "$env_ruby"`
+
+    env=()
+    ok=1
+    while read i; do
+      if [ "$i" == "*ERROR." ]; then
+        ok=0
+      elif [ -n "$i" ]; then
+        env[${#env[@]}]=$i
+      fi
+    done <<< "$raw"
+
+    if [ "$ok" -ne 1 ]; then
+      echo "${env[@]}"
+      echo "YAML syntax error. Please check your containers/*.yml config files."
+      exit 1
+    fi
+
+    read -r -d '' labels_ruby << 'RUBY'
+    require 'yaml'
+
+    input=STDIN.readlines.join
+    # default to UTF-8 for the dbs sake
+    labels = {}
+    input.split('_FILE_SEPERATOR_').each do |yml|
+       yml.strip!
+       begin
+         labels.merge!(YAML.load(yml)['labels'] || {})
+       rescue Psych::SyntaxError => e
+        puts e
+        puts "*ERROR."
+       rescue => e
+        puts yml
+        p e
+       end
+    end
+    puts labels.map{|k,v| "-l\n#{k}=#{v}" }.join("\n")
+RUBY
+
+    raw=`exec echo "$input" | $docker_path run $user_args --rm -i -a stdin -a stdout $image ruby -e "$labels_ruby"`
+
+    labels=()
+    ok=1
+    while read i; do
+      if [ "$i" == "*ERROR." ]; then
+        ok=0
+      elif [ -n "$i" ]; then
+        labels[${#labels[@]}]=$i
+      fi
+    done <<< "$raw"
+
+    if [ "$ok" -ne 1 ]; then
+      echo "${labels[@]}"
+      echo "YAML syntax error. Please check your containers/*.yml config files."
+      exit 1
+    fi
+
+}
+
+bootstrap() {
+
+  # I got no frigging clue what this does, ask Sam Saffron. It RUNS STUFF ON THE HOST I GUESS?
+  host_run
+
+  # Is the image available?
+  # If not, pull it here so the user is aware what's happening.
+  $docker_path history $image >/dev/null 2>&1 || $docker_path pull $image
+
+  set_template_info
+
+  echo ${templates}
+
+  base_image=`cat $config_file | $docker_path run $user_args --rm -i -a stdin -a stdout $image ruby -e \
+    "require 'yaml'; puts YAML.load(STDIN.readlines.join)['base_image']"`
+
+  update_pups=`cat $config_file | $docker_path run $user_args --rm -i -a stdin -a stdout $image ruby -e \
+    "require 'yaml'; puts YAML.load(STDIN.readlines.join)['update_pups']"`
+
+  if [[ ! X"" = X"$base_image" ]]; then
+    image=$base_image
+  fi
+
+  echo ${base_image}
+  echo ${update_pups}
+  echo ${image}
+
+  set_volumes
+  set_links
+
+
+  echo ${cidbootstrap}
+
+  exit;
+
+  rm -f $cidbootstrap
+
+  run_command="cd /pups &&"
+
+  if [[ ! "false" =  $update_pups ]]; then
+    run_command="$run_command git pull &&"
+  fi
+
+  run_command="$run_command /pups/bin/pups --stdin"
+
+  echo $run_command
+
+  unset ERR
+  (exec echo "$input" | $docker_path run $user_args $links "${env[@]}" -e DOCKER_HOST_IP=$docker_ip --cidfile $cidbootstrap -i -a stdin -a stdout -a stderr $volumes $image /bin/bash -c "$run_command") || ERR=$?
+
+  unset FAILED
+  # magic exit code that indicates a retry
+  if [[ "$ERR" == 77 ]]; then
+    $docker_path rm `cat $cidbootstrap`
+    rm $cidbootstrap
+    exit 77
+  elif [[ "$ERR" > 0 ]]; then
+    FAILED=TRUE
+  fi
+
+  if [[ $FAILED = "TRUE" ]]; then
+    if [[ ! -z "$DEBUG" ]]; then
+      $docker_path commit `cat $cidbootstrap` $local_discourse/$config-debug || echo 'FAILED TO COMMIT'
+      echo "** DEBUG ** Maintaining image for diagnostics $local_discourse/$config-debug"
+    fi
+
+    $docker_path rm `cat $cidbootstrap`
+    rm $cidbootstrap
+    echo "** FAILED TO BOOTSTRAP ** please scroll up and look for earlier error messages, there may be more than one"
+    exit 1
+  fi
+
+  sleep 5
+
+  $docker_path commit `cat $cidbootstrap` $local_discourse/$config || echo 'FAILED TO COMMIT'
+  $docker_path rm `cat $cidbootstrap` && rm $cidbootstrap
+}
+
+set_boot_command() {
+  boot_command=`cat $config_file | $docker_path run $user_args --rm -i -a stdin -a stdout $image ruby -e \
+    "require 'yaml'; puts YAML.load(STDIN.readlines.join)['boot_command']"`
+
+  if [ -z "$boot_command" ]; then
+
+    no_boot_command=`cat $config_file | $docker_path run $user_args --rm -i -a stdin -a stdout $image ruby -e \
+      "require 'yaml'; puts YAML.load(STDIN.readlines.join)['no_boot_command']"`
+
+    if [ -z "$no_boot_command" ]; then
+      boot_command="/sbin/boot"
+    fi
+  fi
+
+  echo ${boot_command}
+}
+
+run_start ()
+{
+
+   existing=`$docker_path ps | awk '{ print $1, $(NF) }' | grep " $config$" | awk '{ print $1 }'`
+   echo $existing
+   if [ ! -z $existing ]
+   then
+     echo "Nothing to do, your container has already started!"
+     exit 0
+   fi
+
+   existing=`$docker_path ps -a | awk '{ print $1, $(NF) }' | grep " $config$" | awk '{ print $1 }'`
+   if [ ! -z $existing ]
+   then
+     echo "starting up existing container"
+     (
+       set -x
+       $docker_path start $config
+     )
+     exit 0
+   fi
+
+   host_run
+
+   ports=`cat $config_file | $docker_path run $user_args --rm -i -a stdout -a stdin $image ruby -e \
+         "require 'yaml'; puts YAML.load(STDIN.readlines.join)['expose'].map{|p| \"-p #{p}\"}.join(' ')"`
+
+   docker_args=`cat $config_file | $docker_path run $user_args --rm -i -a stdout -a stdin $image ruby -e \
+          "require 'yaml'; puts YAML.load(STDIN.readlines.join)['docker_args']"`
+
+   set_template_info
+   set_volumes
+   set_links
+   set_run_image
+   set_boot_command
+
+   # get hostname and settings from container configuration
+   for envar in "${env[@]}"
+   do
+     if [[ $envar == DOCKER_USE_HOSTNAME* ]] || [[ $envar == DISCOURSE_HOSTNAME* ]]
+     then
+       # use as environment variable
+       eval $envar
+     fi
+   done
+
+   (
+     hostname=`hostname -s`
+     # overwrite hostname
+     if [ "$DOCKER_USE_HOSTNAME" = "true" ]
+     then
+       hostname=$DISCOURSE_HOSTNAME
+     else
+       hostname=$hostname-$config
+     fi
+
+     # we got to normalize so we only have allowed strings, this is more comprehensive but lets see how bash does first
+     # hostname=`$docker_path run $user_args --rm $image ruby -e 'print ARGV[0].gsub(/[^a-zA-Z-]/, "-")' $hostname`
+     # docker added more hostname rules
+     hostname=${hostname//_/-}
+
+
+     if [ -z "$SKIP_MAC_ADDRESS" ] ; then
+      mac_address="--mac-address $($docker_path run $user_args -i --rm -a stdout -a stderr $image /bin/sh -c "echo $hostname | md5sum | sed 's/^\(..\)\(..\)\(..\)\(..\)\(..\).*$/02:\1:\2:\3:\4:\5/'")"
+     fi
+
+     set -x
+     $docker_path run $user_args $links $attach_on_run $restart_policy "${env[@]}" "${labels[@]}" -h "$hostname" \
+        -e DOCKER_HOST_IP=$docker_ip --name $config -t $ports $volumes $mac_address $docker_args \
+        $run_image $boot_command
+
+   )
+   exit 0
+
+}
+
+
+
+start ()
+{
+
+   existing=`$docker_path ps | awk '{ print $1, $(NF) }' | grep " $config$" | awk '{ print $1 }'`
+   echo $existing
+   if [ ! -z $existing ]
+   then
+     echo "Nothing to do, your container has already started!"
+     #exit 0
+   fi
+
+   existing=`$docker_path ps -a | awk '{ print $1, $(NF) }' | grep " $config$" | awk '{ print $1 }'`
+   if [ ! -z $existing ]
+   then
+     echo "starting up existing container"
+     (
+       set -x
+       #$docker_path start $config
+     )
+     #exit 0
+   fi
+
+   host_run
+
+   ports=`cat $config_file | $docker_path run $user_args --rm -i -a stdout -a stdin $image ruby -e \
+         "require 'yaml'; puts YAML.load(STDIN.readlines.join)['expose'].map{|p| \"-p #{p}\"}.join(' ')"`
+
+   docker_args=`cat $config_file | $docker_path run $user_args --rm -i -a stdout -a stdin $image ruby -e \
+          "require 'yaml'; puts YAML.load(STDIN.readlines.join)['docker_args']"`
+
+   set_template_info
+   volumes
+   set_links
+   set_run_image
+   set_boot_command
+
+
+
+   # get hostname and settings from container configuration
+   for envar in "${env[@]}"
+   do
+     if [[ $envar == DOCKER_USE_HOSTNAME* ]] || [[ $envar == DISCOURSE_HOSTNAME* ]]
+     then
+       # use as environment variable
+       eval $envar
+     fi
+   done
+
+   (
+     hostname=`hostname -s`
+     # overwrite hostname
+     if [ "$DOCKER_USE_HOSTNAME" = "true" ]
+     then
+       hostname=$DISCOURSE_HOSTNAME
+     else
+       hostname=$hostname-$config
+     fi
+
+     # we got to normalize so we only have allowed strings, this is more comprehensive but lets see how bash does first
+     # hostname=`$docker_path run $user_args --rm $image ruby -e 'print ARGV[0].gsub(/[^a-zA-Z-]/, "-")' $hostname`
+     # docker added more hostname rules
+     hostname=${hostname//_/-}
+
+
+     if [ -z "$SKIP_MAC_ADDRESS" ] ; then
+      mac_address="--mac-address $($docker_path run $user_args -i --rm -a stdout -a stderr $image /bin/sh -c "echo $hostname | md5sum | sed 's/^\(..\)\(..\)\(..\)\(..\)\(..\).*$/02:\1:\2:\3:\4:\5/'")"
+     fi
+
+     set -x
+
+     # $docker_path run $user_args $links $attach_on_run $restart_policy "${env[@]}" "${labels[@]}" -h "$hostname" -e DOCKER_HOST_IP=$docker_ip --name $config -t $ports $volumes $mac_address $docker_args $run_image $boot_command
+
+      docker service create --name $config  "${env[@]}" -e DOCKER_HOST_IP=$docker_ip $volumes $run_image $boot_command
+
+   )
+
+   exit 0
+
+}
+
