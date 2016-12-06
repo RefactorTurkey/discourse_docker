@@ -2,13 +2,14 @@
 
 source setup-functions
 
+
 ##
 ## template file names
 ##
 app_name=app
 
 # @todo standalone to service
-template_path=samples/service.yml
+template_path=samples/standalone.yml
 config_file=containers/$app_name.yml
 changelog=/tmp/changelog
 
@@ -19,9 +20,6 @@ check_root
 check_and_install_docker
 check_disk_and_memory
 
-# @todo clear check ports
-check_ports
-
 ##
 ## make a copy of the simple standalone config file
 ##
@@ -31,16 +29,11 @@ then
   echo ""
   echo "If you want to delete your old configuration file and start over:"
   echo "rm $config_file"
-  #todo clear this line
-  rm -fr $config_file;
   exit 1
-else
-  cp $template_path $config_file
-  echo "${template_path} copied ${config_file}";
 fi
 
-scale_ram_and_cpu
 ask_user_for_config
+scale_ram_and_cpu
 validate_config
 
 ##
@@ -48,4 +41,41 @@ validate_config
 ##
 #./launcher bootstrap $app_name && ./launcher start $app_name
 
-./runner bootstrap $app_name
+if [ "$launcher_strategy" == "distributed" ]
+then
+    mkdir -p /var/discourse/shared/redis
+    mkdir -p /var/discourse/shared/redis/log/var-log
+
+    mkdir -p /var/discourse/shared/data
+    mkdir -p /var/discourse/shared/data/log/var-log
+
+    mkdir -p /var/discourse/shared/web-only
+    mkdir -p /var/discourse/shared/web-only/log/var-log
+
+    mkdir -p /var/discourse/shared/standalone
+    mkdir -p /var/discourse/shared/standalone/log/var-log
+
+    docker network create --driver overlay discourse
+
+    docker service rm web data redis
+
+
+    ./launcher bootstrap $redis_name
+    ./launcher start $redis_name
+
+    ./launcher start $data_name
+    ./launcher bootstrap $data_name
+
+    ./launcher bootstrap $app_name
+
+#
+#    ./launcher service $data_name
+#    ./launcher service $redis_name
+#    ./launcher service $app_name
+fi
+
+if [ "$launcher_strategy" == "standalone" ]
+then
+    check_ports
+     ./runner bootstrap $app_name && ./runner start $app_name
+fi

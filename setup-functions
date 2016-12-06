@@ -29,25 +29,23 @@ check_root() {
     echo "This script must be run as root. Please sudo or log in as root first." 1>&2
     exit 1
   fi
-
-  echo "check root : ok";
 }
 
 ##
 ## Do we have docker?
 ##
 check_and_install_docker () {
-#  docker_path=`which docker.io || which docker`
-#  if [ -z $docker_path ]; then
-#    read  -p "Docker not installed. Enter to install from https://get.docker.com/ or Ctrl+C to exit"
-#    curl https://get.docker.com/ | sh
-#  fi
-#
-#  docker_path=`which docker.io || which docker`
-#  if [ -z $docker_path ]; then
-#    echo Docker install failed. Quitting.
-#    exit
-#  fi
+  docker_path=`which docker.io || which docker`
+  if [ -z $docker_path ]; then
+    read  -p "Docker not installed. Enter to install from https://get.docker.com/ or Ctrl+C to exit"
+    curl https://get.docker.com/ | sh
+  fi
+
+  docker_path=`which docker.io || which docker`
+  if [ -z $docker_path ]; then
+    echo Docker install failed. Quitting.
+    exit
+  fi
   echo "check docker : ok";
 }
 
@@ -217,7 +215,7 @@ scale_ram_and_cpu() {
 ##
 ask_user_for_config() {
 
-    local strategy="standalone"
+    local strategy="distributed"
 
     local changelog=/tmp/changelog.$PPID
     local hostname="discourse.stage.domain.com"
@@ -242,7 +240,7 @@ ask_user_for_config() {
   do
       if [ ! -z $strategy ]
         then
-          read -p "What type of setup strategy? [$strategy]: " new_value
+          read -p "What type of setup strategy? (standalone/distributed) [$strategy]: " new_value
           if [ ! -z $new_value ]
           then
               strategy=$new_value
@@ -345,9 +343,44 @@ ask_user_for_config() {
       echo "Let's Encrypt : $letsencrypt_account_email"
     fi
 
+    if [ "$strategy" == "distributed" ]
+    then
+        app_name=web
+        data_name=data
+        redis_name=redis
+
+        template_path=samples/service.yml
+        config_file=containers/$app_name.yml
+
+        db_template=samples/postgres.yml
+        db_config_file=containers/$data_name.yml
+
+        redis_template=samples/redis.yml
+        redis_config_file=containers/$redis_name.yml
+
+        cp $template_path $config_file
+        #echo "${template_path} copied ${config_file}";
+        cp $db_template $db_config_file
+        #echo "${db_template} copied ${db_config_file}";
+        cp $redis_template $redis_config_file
+        #echo "${redis_template} copied ${redis_config_file}";
+    fi
+
     echo ""
     read -p "ENTER to continue, 'n' to try again, Ctrl+C to exit: " config_ok
   done
+
+    if [ "$strategy" == "distributed" ]
+    then
+        sed -i -e "s/^  DISCOURSE_HOSTNAME:.*/  DISCOURSE_HOSTNAME: $hostname/w $changelog" $config_file
+        if [ -s $changelog ]
+        then
+            rm $changelog
+        else
+            echo "DISCOURSE_HOSTNAME change failed."
+            update_ok="n"
+        fi
+    fi
 
   sed -i -e "s/^  DISCOURSE_HOSTNAME:.*/  DISCOURSE_HOSTNAME: $hostname/w $changelog" $config_file
   if [ -s $changelog ]
@@ -443,6 +476,8 @@ ask_user_for_config() {
     echo -e "\nUnfortunately, there was an error changing $config_file\n"
     exit 1
   fi
+
+  launcher_strategy=$strategy
 }
 
 ##
