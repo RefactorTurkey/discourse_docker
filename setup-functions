@@ -215,7 +215,7 @@ scale_ram_and_cpu() {
 ##
 ask_user_for_config() {
 
-    local strategy="distributed"
+    local strategy="normal"
 
     local changelog=/tmp/changelog.$PPID
     local hostname="discourse.stage.domain.com"
@@ -240,7 +240,7 @@ ask_user_for_config() {
   do
       if [ ! -z $strategy ]
         then
-          read -p "What type of setup strategy? (standalone/distributed) [$strategy]: " new_value
+          read -p "What type of setup strategy? (normal/swarm) [$strategy]: " new_value
           if [ ! -z $new_value ]
           then
               strategy=$new_value
@@ -343,7 +343,7 @@ ask_user_for_config() {
       echo "Let's Encrypt : $letsencrypt_account_email"
     fi
 
-    if [ "$strategy" == "distributed" ]
+    if [ "$strategy" == "swarm" ]
     then
         app_name=web
         data_name=data
@@ -359,11 +359,8 @@ ask_user_for_config() {
         redis_config_file=containers/$redis_name.yml
 
         cp $template_path $config_file
-        #echo "${template_path} copied ${config_file}";
         cp $db_template $db_config_file
-        #echo "${db_template} copied ${db_config_file}";
         cp $redis_template $redis_config_file
-        #echo "${redis_template} copied ${redis_config_file}";
     fi
 
     echo ""

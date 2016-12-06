@@ -40,7 +40,7 @@ validate_config
 ##
 #./launcher bootstrap $app_name && ./launcher start $app_name
 
-if [ "$launcher_strategy" == "distributed" ]
+if [ "$launcher_strategy" == "swarm" ]
 then
     rm -fr /var/discourse/shared/*
     docker rm -f $redis_name $data_name $app_name
