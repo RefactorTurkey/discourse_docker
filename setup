@@ -43,6 +43,10 @@ validate_config
 
 if [ "$launcher_strategy" == "distributed" ]
 then
+    rm -fr /var/discourse/shared/*
+    docker rm -f $redis_name $data_name $app_name
+    docker service rm $redis_name $data_name $app_name
+
     mkdir -p /var/discourse/shared/redis
     mkdir -p /var/discourse/shared/redis/log/var-log
 
@@ -55,23 +59,23 @@ then
     mkdir -p /var/discourse/shared/standalone
     mkdir -p /var/discourse/shared/standalone/log/var-log
 
-    docker network create --driver overlay discourse
+    NETWORK="discourse"
 
-    docker service rm web data redis
-
+    docker network ls -f "name=$NETWORK" | grep $NETWORK > /dev/null || (echo "network docker..." && docker network create  --driver overlay  $NETWORK)
 
     ./launcher bootstrap $redis_name
     ./launcher start $redis_name
 
-    ./launcher start $data_name
     ./launcher bootstrap $data_name
+    ./launcher start $data_name
 
     ./launcher bootstrap $app_name
 
-#
-#    ./launcher service $data_name
-#    ./launcher service $redis_name
-#    ./launcher service $app_name
+    docker rm -f $redis_name $data_name
+
+    ./launcher service $data_name
+    ./launcher service $redis_name
+    ./launcher service $app_name
 fi
 
 if [ "$launcher_strategy" == "standalone" ]
