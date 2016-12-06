@@ -59,7 +59,6 @@ then
     mkdir -p /var/discourse/shared/standalone/log/var-log
 
     NETWORK="discourse"
-
     docker network ls -f "name=$NETWORK" | grep $NETWORK > /dev/null || (echo "network docker..." && docker network create  --driver overlay  $NETWORK)
 
     ./launcher bootstrap $redis_name
@@ -77,7 +76,7 @@ then
     ./launcher service $app_name
 fi
 
-if [ "$launcher_strategy" == "standalone" ]
+if [ "$launcher_strategy" == "normal" ]
 then
     check_ports
      ./runner bootstrap $app_name && ./runner start $app_name
