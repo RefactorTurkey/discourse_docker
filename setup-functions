@@ -216,12 +216,15 @@ scale_ram_and_cpu() {
 ## prompt user for typical Discourse config file values
 ##
 ask_user_for_config() {
-  local changelog=/tmp/changelog.$PPID
-  local hostname="discourse.stage.domain.com"
-  local developer_emails="social@monapi.com"
-  local smtp_address="smtp.elasticemail.com"
-  local smtp_port="587"
-  local smtp_user_name="social@monapi.com"
+
+    local strategy="standalone"
+
+    local changelog=/tmp/changelog.$PPID
+    local hostname="discourse.stage.domain.com"
+    local developer_emails="social@monapi.com"
+    local smtp_address="smtp.elasticemail.com"
+    local smtp_port="587"
+    local smtp_user_name="social@monapi.com"
 
   # @todo clear info
   local smtp_password="90be52d4-58e6-4109-93ed-9ae9d8aac7dbz"
@@ -229,6 +232,7 @@ ask_user_for_config() {
   local letsencrypt_status="ENTER to skip"
 
   local new_value=""
+
   local config_ok="n"
   local update_ok="y"
 
@@ -236,6 +240,15 @@ ask_user_for_config() {
 
   while [[ "$config_ok" == "n" ]]
   do
+      if [ ! -z $strategy ]
+        then
+          read -p "What type of setup strategy? [$strategy]: " new_value
+          if [ ! -z $new_value ]
+          then
+              strategy=$new_value
+          fi
+        fi
+
     if [ ! -z $hostname ]
     then
       read -p "Hostname for your Discourse? [$hostname]: " new_value
@@ -319,6 +332,7 @@ ask_user_for_config() {
     fi
 
     echo -e "\nDoes this look right?\n"
+    echo "Strategy      : $strategy"
     echo "Hostname      : $hostname"
     echo "Email         : $developer_emails"
     echo "SMTP address  : $smtp_address"
