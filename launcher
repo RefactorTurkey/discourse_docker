@@ -602,7 +602,11 @@ run_service() {
 #        -e DOCKER_HOST_IP=$docker_ip --name $config -t $ports $volumes $mac_address $docker_args \
 #        $run_image $boot_command
 
-     docker service create --name $config $ports --network discourse "${env[@]}" -e DOCKER_HOST_IP=$docker_ip $volumes $run_image $boot_command
+        last_image=registry.monapi.com:5000/monapi/discourse.$config:test
+        docker tag $run_image $last_image
+        docker push $last_image
+
+        $docker_path service create --name $config $ports --network discourse "${env[@]}" -e DOCKER_HOST_IP=$docker_ip $volumes $last_image $boot_command
 
    )
    exit 0

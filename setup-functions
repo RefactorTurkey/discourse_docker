@@ -475,6 +475,7 @@ ask_user_for_config() {
   fi
 
   launcher_strategy=$strategy
+  host=$hostname
 }
 
 ##
